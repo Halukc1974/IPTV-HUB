@@ -591,7 +591,7 @@ private struct TVOSVoDPlayerView: View {
                                     Button(option.title) { selectAudio(option) }
                                 }
                             } label: {
-                                Label("Audio", systemImage: "waveform")
+                                Label("Audio (\(audioOptions.count))", systemImage: "waveform")
                                     .font(.footnote.bold())
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 8)
@@ -605,7 +605,7 @@ private struct TVOSVoDPlayerView: View {
                                     Button(option.title) { selectSubtitle(option) }
                                 }
                             } label: {
-                                Label("Subs", systemImage: "captions.bubble")
+                                Label("Subs (\(subtitleOptions.count))", systemImage: "captions.bubble")
                                     .font(.footnote.bold())
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 8)
@@ -645,6 +645,7 @@ private struct TVOSVoDPlayerView: View {
             }
         }
         .onAppear {
+            print("[tvOS VoD] onAppear called")
             configureTimeObserver()
             refreshMediaOptions()
             focusedControl = .playPause
@@ -653,7 +654,8 @@ private struct TVOSVoDPlayerView: View {
             removeTimeObserver()
             playerViewModel.cleanup()
         }
-        .onReceive(playerViewModel.$currentChannel) { _ in
+        .onReceive(playerViewModel.$currentChannel) { channel in
+            print("[tvOS VoD] currentChannel changed: \(channel.name)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 refreshMediaOptions()
             }
@@ -746,36 +748,37 @@ private struct TVOSVoDPlayerView: View {
     }
     
     private func refreshMediaOptions() {
-        guard let item = playerViewModel.player.currentItem else { return }
+        print("[tvOS VoD] refreshMediaOptions called")
+        guard let item = playerViewModel.player.currentItem else {
+            print("[tvOS VoD] No currentItem")
+            return
+        }
+        print("[tvOS VoD] currentItem exists: \(item)")
+        
         if let audioGroup = item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible) {
             self.audioGroup = audioGroup
             let selected = item.currentMediaSelection.selectedMediaOption(in: audioGroup)
-            let newOptions = audioGroup.options.map { VoDMediaOption.from($0) }
-            if audioOptions.isEmpty || audioOptions.count != newOptions.count {
-                audioOptions = newOptions
-            }
-            if selectedAudioID == nil, let selected = selected {
-                selectedAudioID = VoDMediaOption.optionID(for: selected)
-            }
+            audioOptions = audioGroup.options.map { VoDMediaOption.from($0) }
+            selectedAudioID = selected.map { VoDMediaOption.optionID(for: $0) }
+            print("[tvOS VoD] Audio options loaded: \(audioOptions.count) options")
         } else {
             audioOptions = []
             audioGroup = nil
             selectedAudioID = nil
+            print("[tvOS VoD] No audio group found")
         }
+        
         if let subtitleGroup = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
             self.subtitleGroup = subtitleGroup
             let selected = item.currentMediaSelection.selectedMediaOption(in: subtitleGroup)
-            let newOptions = subtitleGroup.options.map { VoDMediaOption.from($0) }
-            if subtitleOptions.isEmpty || subtitleOptions.count != newOptions.count {
-                subtitleOptions = newOptions
-            }
-            if selectedSubtitleID == nil, let selected = selected {
-                selectedSubtitleID = VoDMediaOption.optionID(for: selected)
-            }
+            subtitleOptions = subtitleGroup.options.map { VoDMediaOption.from($0) }
+            selectedSubtitleID = selected.map { VoDMediaOption.optionID(for: $0) }
+            print("[tvOS VoD] Subtitle options loaded: \(subtitleOptions.count) options")
         } else {
             subtitleOptions = []
             subtitleGroup = nil
             selectedSubtitleID = nil
+            print("[tvOS VoD] No subtitle group found")
         }
     }
     

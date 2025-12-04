@@ -341,7 +341,7 @@ struct MoviePosterCard: View {
         .shadow(color: Color.black.opacity(0.08), radius: 6, y: 3)
         #endif
         .fullScreenCover(item: $selectedChannel) { channel in
-            PlayerView(initialChannel: channel)
+            VoDPlayerView(initialChannel: channel)
                 .environmentObject(viewModel)
         }
     }
@@ -571,7 +571,7 @@ struct ServerMediaCard: View {
         .shadow(color: Color.black.opacity(0.06), radius: 10, y: 4)
         #endif
         .fullScreenCover(item: $selectedChannel) { channel in
-            PlayerView(initialChannel: channel, channelCollection: viewModel.serverChannels)
+            VoDPlayerView(initialChannel: channel, channelCollection: viewModel.serverChannels)
                 .environmentObject(viewModel)
         }
     }
