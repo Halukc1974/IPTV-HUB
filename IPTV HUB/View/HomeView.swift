@@ -11,6 +11,7 @@ struct HomeView: View {
     
     @EnvironmentObject var viewModel: MainViewModel
     @EnvironmentObject var playlistManager: PlaylistManager
+    @Environment(\.tabSearchResetToken) private var tabSearchResetToken
     
     @State private var selectedChannel: Channel?
     @State private var searchText = ""
@@ -184,6 +185,9 @@ struct HomeView: View {
         .onChange(of: selectedPlaylistID) { _ in
             // Update when playlist filter changes
             updateFilteredChannels()
+        }
+        .onChange(of: tabSearchResetToken) { _ in
+            searchText = ""
         }
         .onAppear {
             // Initial cache

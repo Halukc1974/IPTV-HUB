@@ -6,6 +6,7 @@ struct ChannelListView: View {
     // Access the shared ViewModel
     @EnvironmentObject var viewModel: MainViewModel
     @EnvironmentObject var playlistManager: PlaylistManager // Direct access to category data
+    @Environment(\.tabSearchResetToken) private var tabSearchResetToken
     
     // Selected channel to open the player
     @State private var selectedChannel: Channel?
@@ -181,6 +182,9 @@ struct ChannelListView: View {
             CategoryChannelSelector(channel: channel)
                 .environmentObject(viewModel)
                 .environmentObject(playlistManager)
+        }
+        .onChange(of: tabSearchResetToken) { _ in
+            searchText = ""
         }
     }
 }

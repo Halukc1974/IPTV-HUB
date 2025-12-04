@@ -490,6 +490,7 @@ struct iOSChannelListOverlay: View {
     let onSelect: (Channel) -> Void
     @State private var searchText = ""
     @AppStorage("channelOverlayOpacity") private var channelOverlayOpacity: Double = 0.9
+    @Environment(\.tabSearchResetToken) private var tabSearchResetToken
     
     private var filteredChannels: [Channel] {
         if searchText.isEmpty { return channels }
@@ -550,6 +551,9 @@ struct iOSChannelListOverlay: View {
             .frame(width: 500)
             .background(Color.black.opacity(channelOverlayOpacity))
             .edgesIgnoringSafeArea(.all)
+        }
+        .onChange(of: tabSearchResetToken) { _ in
+            searchText = ""
         }
     }
 }

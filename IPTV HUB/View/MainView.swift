@@ -1,10 +1,8 @@
 import SwiftUI
 
-#if os(iOS)
 private enum MainTab: Hashable, CaseIterable {
     case home, channels, vod, guide, categories, playlists, settings
 }
-#endif
 
 struct MainView: View {
     
@@ -17,12 +15,13 @@ struct MainView: View {
     @AppStorage("themeMode") private var themeModeString: String = "System"
     @AppStorage("showTVGuide") private var showTVGuide: Bool = true
 
-#if os(iOS)
     @State private var selectedTab: MainTab = .home
+#if os(iOS)
     @State private var tabResetTokens: [MainTab: UUID] = Dictionary(
         uniqueKeysWithValues: MainTab.allCases.map { ($0, UUID()) }
     )
 #endif
+    @State private var searchResetToken = UUID()
     
     private var colorScheme: ColorScheme? {
         switch themeModeString {
@@ -59,49 +58,65 @@ struct MainView: View {
     var body: some View {
         #if os(tvOS)
         // tvOS: TabView with custom font sizes set via UIKit appearance
-        TabView {
+        TabView(selection: $selectedTab) {
             HomeView()
                 .tabItem {
                     Label("Home", systemImage: "house.fill")
                 }
+                .tag(MainTab.home)
             
             ChannelListView()
                 .tabItem {
                     Label("TV", systemImage: "tv.fill")
                 }
+                .tag(MainTab.channels)
             
             VoDContentView()
                 .tabItem {
                     Label("VoD", systemImage: "film.fill")
                 }
+                .tag(MainTab.vod)
             
             if showTVGuide {
                 EPGGridView()
                     .tabItem {
                         Label("Guide", systemImage: "list.bullet.rectangle")
                     }
+                    .tag(MainTab.guide)
             }
 
             CategoryManagerView()
                 .tabItem {
                     Label("Categories", systemImage: "folder.fill")
                 }
+                .tag(MainTab.categories)
             
             SettingsView()
                 .tabItem {
                     Label("lists", systemImage: "rectangle.stack.fill")
                 }
+                .tag(MainTab.playlists)
             
             AppSettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gear")
                 }
+                .tag(MainTab.settings)
         }
         .preferredColorScheme(colorScheme)
         .environmentObject(viewModel)
         .environmentObject(playlistManager)
+        .environment(\.tabSearchResetToken, searchResetToken)
         .onAppear {
             loadInitialPlaylist()
+        }
+        .onChange(of: selectedTab) { _ in
+            bumpSearchResetToken()
+        }
+        .onChange(of: showTVGuide) { isVisible in
+            if !isVisible && selectedTab == .guide {
+                selectedTab = .home
+            }
         }
         #else
         // iOS: Standard TabView
@@ -147,12 +162,14 @@ struct MainView: View {
         .preferredColorScheme(colorScheme)
         .environmentObject(viewModel)
         .environmentObject(playlistManager)
+        .environment(\.tabSearchResetToken, searchResetToken)
         .onAppear {
             loadInitialPlaylist()
             resetTab(selectedTab)
         }
         .onChange(of: selectedTab) { newValue in
             resetTab(newValue)
+            bumpSearchResetToken()
         }
         .onChange(of: showTVGuide) { isVisible in
             if !isVisible && selectedTab == .guide {
@@ -192,3 +209,22 @@ private extension MainView {
     }
 }
 #endif
+
+private extension MainView {
+    func bumpSearchResetToken() {
+        searchResetToken = UUID()
+    }
+}
+
+// MARK: - Environment Keys
+
+private struct TabSearchResetTokenKey: EnvironmentKey {
+    static var defaultValue = UUID()
+}
+
+extension EnvironmentValues {
+    var tabSearchResetToken: UUID {
+        get { self[TabSearchResetTokenKey.self] }
+        set { self[TabSearchResetTokenKey.self] = newValue }
+    }
+}

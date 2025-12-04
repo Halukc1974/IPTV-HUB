@@ -10,8 +10,11 @@ import SwiftUI
 // MARK: - VoD Content View (Movies & Series)
 struct VoDContentView: View {
     @EnvironmentObject var viewModel: MainViewModel
+    @Environment(\.tabSearchResetToken) private var tabSearchResetToken
     @State private var selectedTab: VoDTab = .movies
     @State private var searchText: String = ""
+    @State private var hasPerformedInitialServerRefresh = false
+    @State private var isViewVisible = false
     @AppStorage("embyServerURL") private var embyServerURL: String = ""
     @AppStorage("embyServerToken") private var embyServerToken: String = ""
     @AppStorage("plexServerURL") private var plexServerURL: String = ""
@@ -40,23 +43,17 @@ struct VoDContentView: View {
     }
     
     var filteredMovies: [Channel] {
-        if searchText.isEmpty {
-            return movies
-        }
+        guard !searchText.isEmpty else { return movies }
         return movies.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
     
     var filteredSeries: [Channel] {
-        if searchText.isEmpty {
-            return series
-        }
+        guard !searchText.isEmpty else { return series }
         return series.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
     
     var myServerItems: [Channel] {
-        if searchText.isEmpty {
-            return viewModel.serverChannels
-        }
+        guard !searchText.isEmpty else { return viewModel.serverChannels }
         return viewModel.serverChannels.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
     
@@ -64,6 +61,27 @@ struct VoDContentView: View {
         let embyReady = !embyServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !embyServerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let plexReady = !plexServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !plexServerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return embyReady || plexReady
+    }
+
+    private var posterGridColumns: [GridItem] {
+        #if os(tvOS)
+        return Array(repeating: GridItem(.flexible(minimum: 220, maximum: 360), spacing: 24), count: 4)
+        #else
+        return [
+            GridItem(.flexible(), spacing: 12),
+            GridItem(.flexible(), spacing: 12),
+            GridItem(.flexible(), spacing: 12),
+            GridItem(.flexible(), spacing: 12)
+        ]
+        #endif
+    }
+
+    private var serverGridColumns: [GridItem] {
+        #if os(tvOS)
+        return [GridItem(.adaptive(minimum: 360), spacing: 24)]
+        #else
+        return [GridItem(.adaptive(minimum: 220), spacing: 18)]
+        #endif
     }
     
     var body: some View {
@@ -159,38 +177,43 @@ struct VoDContentView: View {
             }
         }
         .onAppear {
-            if selectedTab == .myServer {
-                refreshServerLibraries(force: true)
-            }
+            isViewVisible = true
+            triggerInitialServerRefreshIfNeeded()
+        }
+        .onDisappear {
+            isViewVisible = false
         }
         .onChange(of: selectedTab) { newValue in
             if newValue == .myServer {
-                refreshServerLibraries(force: true)
+                triggerInitialServerRefreshIfNeeded()
             }
         }
         .onChange(of: embyServerURL) { _ in
-            refreshServerLibraries()
+            resetServerRefreshStateAndReload()
         }
         .onChange(of: embyServerToken) { _ in
-            refreshServerLibraries()
+            resetServerRefreshStateAndReload()
         }
         .onChange(of: plexServerURL) { _ in
-            refreshServerLibraries()
+            resetServerRefreshStateAndReload()
         }
         .onChange(of: plexServerToken) { _ in
-            refreshServerLibraries()
+            resetServerRefreshStateAndReload()
+        }
+        .onChange(of: tabSearchResetToken) { _ in
+            searchText = ""
         }
     }
     
     // MARK: - Movies Grid
     private var moviesGrid: some View {
-        ScrollView {
-            LazyVGrid(columns: [
-                GridItem(.flexible(), spacing: 12),
-                GridItem(.flexible(), spacing: 12),
-                GridItem(.flexible(), spacing: 12),
-                GridItem(.flexible(), spacing: 12)
-            ], spacing: 16) {
+        #if os(tvOS)
+        let rowSpacing: CGFloat = 24
+        #else
+        let rowSpacing: CGFloat = 16
+        #endif
+        return ScrollView {
+            LazyVGrid(columns: posterGridColumns, spacing: rowSpacing) {
                 ForEach(filteredMovies) { movie in
                     MoviePosterCard(movie: movie)
                 }
@@ -198,17 +221,20 @@ struct VoDContentView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 20)
         }
+        #if os(tvOS)
+        .focusSection()
+        #endif
     }
     
     // MARK: - Series Grid
     private var seriesGrid: some View {
-        ScrollView {
-            LazyVGrid(columns: [
-                GridItem(.flexible(), spacing: 12),
-                GridItem(.flexible(), spacing: 12),
-                GridItem(.flexible(), spacing: 12),
-                GridItem(.flexible(), spacing: 12)
-            ], spacing: 16) {
+        #if os(tvOS)
+        let rowSpacing: CGFloat = 24
+        #else
+        let rowSpacing: CGFloat = 16
+        #endif
+        return ScrollView {
+            LazyVGrid(columns: posterGridColumns, spacing: rowSpacing) {
                 ForEach(filteredSeries) { show in
                     SeriesPosterCard(series: show)
                 }
@@ -216,6 +242,9 @@ struct VoDContentView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 20)
         }
+        #if os(tvOS)
+        .focusSection()
+        #endif
     }
 
     // MARK: - My Server Grid
@@ -243,7 +272,7 @@ struct VoDContentView: View {
             } else {
                 ScrollView {
                     LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 220), spacing: 18)],
+                        columns: serverGridColumns,
                         spacing: 20
                     ) {
                         ForEach(myServerItems) { item in
@@ -253,13 +282,32 @@ struct VoDContentView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 32)
                 }
+                #if os(tvOS)
+                .focusSection()
+                #endif
             }
         }
         .padding(.top, 8)
     }
 
+    private func triggerInitialServerRefreshIfNeeded() {
+        guard isViewVisible, selectedTab == .myServer, hasServerConnection else { return }
+        guard !hasPerformedInitialServerRefresh else { return }
+        refreshServerLibraries(force: true)
+    }
+
+    private func resetServerRefreshStateAndReload() {
+        hasPerformedInitialServerRefresh = false
+        refreshServerLibraries()
+    }
+
     private func refreshServerLibraries(force: Bool = false) {
-        guard force || selectedTab == .myServer else { return }
+        if force {
+            hasPerformedInitialServerRefresh = true
+        } else {
+            guard isViewVisible, selectedTab == .myServer else { return }
+            hasPerformedInitialServerRefresh = true
+        }
         viewModel.refreshServerLibraries(
             embyURL: embyServerURL,
             embyToken: embyServerToken,
@@ -274,79 +322,33 @@ struct MoviePosterCard: View {
     let movie: Channel
     @EnvironmentObject var viewModel: MainViewModel
     @State private var selectedChannel: Channel?
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    #endif
     
     var body: some View {
+        Button {
+            selectedChannel = movie
+        } label: {
+            movieCardContent
+        }
+        .buttonStyle(.plain)
+        #if os(tvOS)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .shadow(color: isFocused ? Color.black.opacity(0.25) : Color.black.opacity(0.08), radius: isFocused ? 18 : 6, y: isFocused ? 8 : 3)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+        #else
+        .shadow(color: Color.black.opacity(0.08), radius: 6, y: 3)
+        #endif
+        .fullScreenCover(item: $selectedChannel) { channel in
+            PlayerView(initialChannel: channel)
+                .environmentObject(viewModel)
+        }
+    }
+
+    private var movieCardContent: some View {
         VStack(spacing: 0) {
-            // Poster image
-            ZStack {
-                if let logoURL = movie.cover ?? movie.logo {
-                    SecureAsyncImage(url: logoURL) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        Rectangle()
-                            .fill(Color(red: 0.9, green: 0.9, blue: 0.92))
-                            .aspectRatio(2/3, contentMode: .fit)
-                            .overlay(
-                                Image(systemName: "film.fill")
-                                    .font(.system(size: 30))
-                                    .foregroundColor(Color(red: 0.7, green: 0.7, blue: 0.75))
-                            )
-                    }
-                } else {
-                    Rectangle()
-                        .fill(Color(red: 0.9, green: 0.9, blue: 0.92))
-                        .aspectRatio(2/3, contentMode: .fit)
-                        .overlay(
-                            Image(systemName: "film.fill")
-                                .font(.system(size: 30))
-                                .foregroundColor(Color(red: 0.7, green: 0.7, blue: 0.75))
-                        )
-                }
-                
-                // Rating badge
-                if let rating = movie.rating, !rating.isNaN, !rating.isInfinite {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            HStack(spacing: 4) {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 10))
-                                Text(String(format: "%.1f", rating))
-                                    .font(.system(size: 12, weight: .bold))
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.black.opacity(0.7))
-                            .cornerRadius(8)
-                            .padding(8)
-                        }
-                        Spacer()
-                    }
-                }
-                
-                // Play button overlay
-                Button(action: {
-                    selectedChannel = movie
-                }) {
-                    Circle()
-                        .fill(Color.black.opacity(0.7))
-                        .frame(width: 50, height: 50)
-                        .overlay(
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 22))
-                                .foregroundColor(.white)
-                                .offset(x: 2)
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-            .aspectRatio(2/3, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            
-            // Title
+            posterBody
             Text(movie.name)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.25))
@@ -357,11 +359,74 @@ struct MoviePosterCard: View {
         }
         .background(Color.white)
         .cornerRadius(10)
-        .shadow(color: Color.black.opacity(0.08), radius: 6, y: 3)
-        .fullScreenCover(item: $selectedChannel) { channel in
-            PlayerView(initialChannel: channel)
-                .environmentObject(viewModel)
+    }
+    
+    private var posterBody: some View {
+        ZStack {
+            if let logoURL = movie.cover ?? movie.logo {
+                SecureAsyncImage(url: logoURL) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    placeholderPoster(icon: "film.fill")
+                }
+            } else {
+                placeholderPoster(icon: "film.fill")
+            }
+            
+            if let rating = movie.rating, !rating.isNaN, !rating.isInfinite {
+                ratingBadge(for: rating)
+            }
+            
+            playBadge
         }
+        .aspectRatio(2/3, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+    
+    private func placeholderPoster(icon: String) -> some View {
+        Rectangle()
+            .fill(Color(red: 0.9, green: 0.9, blue: 0.92))
+            .aspectRatio(2/3, contentMode: .fit)
+            .overlay(
+                Image(systemName: icon)
+                    .font(.system(size: 30))
+                    .foregroundColor(Color(red: 0.7, green: 0.7, blue: 0.75))
+            )
+    }
+    
+    private func ratingBadge(for rating: Double) -> some View {
+        VStack {
+            HStack {
+                Spacer()
+                HStack(spacing: 4) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 10))
+                    Text(String(format: "%.1f", rating))
+                        .font(.system(size: 12, weight: .bold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.black.opacity(0.7))
+                .cornerRadius(8)
+                .padding(8)
+            }
+            Spacer()
+        }
+    }
+    
+    private var playBadge: some View {
+        Circle()
+            .fill(Color.black.opacity(0.7))
+            .frame(width: 50, height: 50)
+            .overlay(
+                Image(systemName: "play.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(.white)
+                    .offset(x: 2)
+            )
     }
 }
 
@@ -369,79 +434,32 @@ struct MoviePosterCard: View {
 struct SeriesPosterCard: View {
     let series: Channel
     @State private var showSeriesDetail = false
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    #endif
     
     var body: some View {
+        Button {
+            showSeriesDetail = true
+        } label: {
+            seriesCardContent
+        }
+        .buttonStyle(.plain)
+        #if os(tvOS)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .shadow(color: isFocused ? Color.black.opacity(0.25) : Color.black.opacity(0.08), radius: isFocused ? 18 : 6, y: isFocused ? 8 : 3)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+        #else
+        .shadow(color: Color.black.opacity(0.08), radius: 6, y: 3)
+        #endif
+        .sheet(isPresented: $showSeriesDetail) {
+            SeriesDetailView(series: series)
+        }
+    }
+
+    private var seriesCardContent: some View {
         VStack(spacing: 0) {
-            // Poster image
-            ZStack {
-                if let logoURL = series.cover ?? series.logo {
-                    SecureAsyncImage(url: logoURL) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        Rectangle()
-                            .fill(Color(red: 0.9, green: 0.9, blue: 0.92))
-                            .aspectRatio(2/3, contentMode: .fit)
-                            .overlay(
-                                Image(systemName: "tv.fill")
-                                    .font(.system(size: 30))
-                                    .foregroundColor(Color(red: 0.7, green: 0.7, blue: 0.75))
-                            )
-                    }
-                } else {
-                    Rectangle()
-                        .fill(Color(red: 0.9, green: 0.9, blue: 0.92))
-                        .aspectRatio(2/3, contentMode: .fit)
-                        .overlay(
-                            Image(systemName: "tv.fill")
-                                .font(.system(size: 30))
-                                .foregroundColor(Color(red: 0.7, green: 0.7, blue: 0.75))
-                        )
-                }
-                
-                // Rating badge
-                if let rating = series.rating, !rating.isNaN, !rating.isInfinite {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            HStack(spacing: 4) {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 10))
-                                Text(String(format: "%.1f", rating))
-                                    .font(.system(size: 12, weight: .bold))
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.black.opacity(0.7))
-                            .cornerRadius(8)
-                            .padding(8)
-                        }
-                        Spacer()
-                    }
-                }
-                
-                // Play button overlay
-                Button(action: {
-                    showSeriesDetail = true
-                }) {
-                    Circle()
-                        .fill(Color.black.opacity(0.7))
-                        .frame(width: 50, height: 50)
-                        .overlay(
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 22))
-                                .foregroundColor(.white)
-                                .offset(x: 2)
-                        )
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-            .aspectRatio(2/3, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            
-            // Title
+            posterBody
             Text(series.name)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(Color(red: 0.15, green: 0.15, blue: 0.25))
@@ -452,10 +470,74 @@ struct SeriesPosterCard: View {
         }
         .background(Color.white)
         .cornerRadius(10)
-        .shadow(color: Color.black.opacity(0.08), radius: 6, y: 3)
-        .sheet(isPresented: $showSeriesDetail) {
-            SeriesDetailView(series: series)
+    }
+    
+    private var posterBody: some View {
+        ZStack {
+            if let logoURL = series.cover ?? series.logo {
+                SecureAsyncImage(url: logoURL) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    placeholderPoster
+                }
+            } else {
+                placeholderPoster
+            }
+            
+            if let rating = series.rating, !rating.isNaN, !rating.isInfinite {
+                ratingBadge(for: rating)
+            }
+            
+            playBadge
         }
+        .aspectRatio(2/3, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+    
+    private var placeholderPoster: some View {
+        Rectangle()
+            .fill(Color(red: 0.9, green: 0.9, blue: 0.92))
+            .aspectRatio(2/3, contentMode: .fit)
+            .overlay(
+                Image(systemName: "tv.fill")
+                    .font(.system(size: 30))
+                    .foregroundColor(Color(red: 0.7, green: 0.7, blue: 0.75))
+            )
+    }
+    
+    private func ratingBadge(for rating: Double) -> some View {
+        VStack {
+            HStack {
+                Spacer()
+                HStack(spacing: 4) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 10))
+                    Text(String(format: "%.1f", rating))
+                        .font(.system(size: 12, weight: .bold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.black.opacity(0.7))
+                .cornerRadius(8)
+                .padding(8)
+            }
+            Spacer()
+        }
+    }
+    
+    private var playBadge: some View {
+        Circle()
+            .fill(Color.black.opacity(0.7))
+            .frame(width: 50, height: 50)
+            .overlay(
+                Image(systemName: "play.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(.white)
+                    .offset(x: 2)
+            )
     }
 }
 
@@ -464,6 +546,9 @@ struct ServerMediaCard: View {
     let item: Channel
     @EnvironmentObject var viewModel: MainViewModel
     @State private var selectedChannel: Channel?
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    #endif
     
     private var providerLabel: String {
         if item.group.lowercased().contains("plex") { return "Plex" }
@@ -472,13 +557,32 @@ struct ServerMediaCard: View {
     }
     
     var body: some View {
+        Button {
+            selectedChannel = item
+        } label: {
+            cardContent
+        }
+        .buttonStyle(.plain)
+        #if os(tvOS)
+        .scaleEffect(isFocused ? 1.03 : 1.0)
+        .shadow(color: isFocused ? Color.black.opacity(0.25) : Color.black.opacity(0.06), radius: isFocused ? 18 : 10, y: isFocused ? 8 : 4)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+        #else
+        .shadow(color: Color.black.opacity(0.06), radius: 10, y: 4)
+        #endif
+        .fullScreenCover(item: $selectedChannel) { channel in
+            PlayerView(initialChannel: channel, channelCollection: viewModel.serverChannels)
+                .environmentObject(viewModel)
+        }
+    }
+
+    private var cardContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             posterView
                 .overlay(providerBadge, alignment: .topLeading)
-                .overlay(playButton, alignment: .bottomTrailing)
-            .aspectRatio(16/9, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .shadow(color: Color.black.opacity(0.08), radius: 8, y: 4)
+                .overlay(playBadge, alignment: .bottomTrailing)
+                .aspectRatio(16/9, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
             
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.name)
@@ -500,11 +604,6 @@ struct ServerMediaCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white)
         .cornerRadius(16)
-        .shadow(color: Color.black.opacity(0.06), radius: 10, y: 4)
-        .fullScreenCover(item: $selectedChannel) { channel in
-            PlayerView(initialChannel: channel, channelCollection: viewModel.serverChannels)
-                .environmentObject(viewModel)
-        }
     }
 
     private var posterView: some View {
@@ -526,7 +625,7 @@ struct ServerMediaCard: View {
     private var placeholderView: some View {
         Rectangle()
             .fill(Color(red: 0.9, green: 0.9, blue: 0.92))
-            .aspectRatio(2/3, contentMode: .fit)
+            .aspectRatio(16/9, contentMode: .fit)
             .overlay(
                 Image(systemName: "externaldrive.fill")
                     .font(.system(size: 30))
@@ -545,20 +644,17 @@ struct ServerMediaCard: View {
             .padding(12)
     }
     
-    private var playButton: some View {
-        Button(action: { selectedChannel = item }) {
-            Circle()
-                .fill(Color.black.opacity(0.7))
-                .frame(width: 46, height: 46)
-                .overlay(
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(.white)
-                        .offset(x: 2)
-                )
-        }
-        .buttonStyle(PlainButtonStyle())
-        .padding(12)
+    private var playBadge: some View {
+        Circle()
+            .fill(Color.black.opacity(0.7))
+            .frame(width: 46, height: 46)
+            .overlay(
+                Image(systemName: "play.fill")
+                    .font(.system(size: 20))
+                    .foregroundColor(.white)
+                    .offset(x: 2)
+            )
+            .padding(12)
     }
     
     private var metadataStack: some View {

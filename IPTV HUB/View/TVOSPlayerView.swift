@@ -342,6 +342,7 @@ struct TVChannelListOverlay: View {
     @State private var searchText: String = ""
     @AppStorage("channelOverlayOpacity") private var channelOverlayOpacity: Double = 0.9
     @FocusState private var focusedChannelID: String?
+    @Environment(\.tabSearchResetToken) private var tabSearchResetToken
     
     var filteredChannels: [Channel] {
         if searchText.isEmpty { return channels }
@@ -429,6 +430,9 @@ struct TVChannelListOverlay: View {
         }
         .background(Color.black.opacity(channelOverlayOpacity)) // E. TRANSPARENT SİYAH ARKA PLAN
         .edgesIgnoringSafeArea(.vertical)
+        .onChange(of: tabSearchResetToken) { _ in
+            searchText = ""
+        }
     }
 }
 
