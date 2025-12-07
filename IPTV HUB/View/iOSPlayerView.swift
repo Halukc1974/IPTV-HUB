@@ -5,6 +5,7 @@ import AVKit
 struct iOSPlayerView: View {
     @EnvironmentObject var viewModel: MainViewModel
     @EnvironmentObject var playlistManager: PlaylistManager
+    @EnvironmentObject var miniPlayerManager: MiniPlayerManager
     @Environment(\.dismiss) var dismiss
     
     @StateObject private var playerViewModel: PlayerViewModel
@@ -24,8 +25,12 @@ struct iOSPlayerView: View {
     // Auto-Hide Task
     @State private var hideOverlayTask: Task<Void, Never>?
     
-    init(initialChannel: Channel, channelCollection: [Channel]? = nil, playerType: VideoPlayerType) {
-        _playerViewModel = StateObject(wrappedValue: PlayerViewModel(channel: initialChannel, preferredPlayer: playerType))
+    init(initialChannel: Channel, channelCollection: [Channel]? = nil, playerType: VideoPlayerType, existingPlayer: AVPlayer? = nil) {
+        if let existing = existingPlayer {
+            _playerViewModel = StateObject(wrappedValue: PlayerViewModel(player: existing, channel: initialChannel, preferredPlayer: playerType))
+        } else {
+            _playerViewModel = StateObject(wrappedValue: PlayerViewModel(channel: initialChannel, preferredPlayer: playerType))
+        }
         self.channelCollection = channelCollection
         self.playerType = playerType
     }
@@ -45,7 +50,9 @@ struct iOSPlayerView: View {
             iOSVideoPlayerRepresentable(
                 player: playerViewModel.player,
                 videoGravity: selectedAspectRatio.videoGravity,
-                allowsExternalPlayback: playerType == .avKit
+                allowsExternalPlayback: playerType == .avKit,
+                pipController: $miniPlayerManager.pipController,
+                viewModel: playerViewModel
             )
             .ignoresSafeArea()
             .onTapGesture { toggleOverlay() }
@@ -75,9 +82,31 @@ struct iOSPlayerView: View {
                     showAspectRatioSheet: $showAspectRatioSheet,
                     showDetailsPanel: $showDetailsPanel,
                     showSupportHelp: $showSupportHelp,
-                    onDismiss: {
-                        playerViewModel.cleanup()
+                    onMiniToggle: {
+                        print("🎬 Mini player toggle tapped!")
+                        // Use custom floating mini player with hybrid PiP support
+                        miniPlayerManager.show(
+                            player: playerViewModel.player,
+                            channel: playerViewModel.currentChannel,
+                            videoGravity: selectedAspectRatio.videoGravity,
+                            pipController: miniPlayerManager.pipController, // Shared PiP controller for background mode
+                            onExpand: {
+                                print("🔄 Expand callback registered")
+                                // Expand'e basıldığında buraya geri dönecek
+                                // Mini player otomatik hide olacak
+                            }
+                        )
+                        print("✅ Mini player show called, dismissing player view...")
+                        // Player view'i dismiss et, mini player görünür olacak
                         dismiss()
+                    },
+                    onDismiss: {
+                        if miniPlayerManager.isVisible {
+                            dismiss()
+                        } else {
+                            playerViewModel.cleanup()
+                            dismiss()
+                        }
                     }
                 )
                 .transition(.opacity)
@@ -108,6 +137,7 @@ struct iOSPlayerView: View {
                 .zIndex(3)
                 .transition(.move(edge: .leading))
             }
+
         }
         // iOS SHEET MENÜLERİ
         .sheet(isPresented: $showAspectRatioSheet) {
@@ -157,8 +187,18 @@ struct iOSPlayerView: View {
                 selectedIndex = 0
             }
             toggleOverlay()
+            // Share delegate reference for persistent PiP host
+            viewModel.playerViewModelDelegate = playerViewModel
+            // Ensure mini player knows the current player
+            miniPlayerManager.currentPlayer = playerViewModel.player
+            miniPlayerManager.videoGravity = selectedAspectRatio.videoGravity
         }
-        .onDisappear { playerViewModel.cleanup() }
+        .onDisappear {
+            // Mini player aktifse cleanup yapma, player arka planda çalışmaya devam etsin
+            if !miniPlayerManager.isVisible {
+                playerViewModel.cleanup()
+            }
+        }
     }
     
     private func getCurrentChannel() -> Channel {
@@ -185,28 +225,6 @@ struct iOSPlayerView: View {
 
 // MARK: - iOS SPECIFIC UI COMPONENTS
 
-struct iOSVideoPlayerRepresentable: UIViewControllerRepresentable {
-    let player: AVPlayer
-    let videoGravity: AVLayerVideoGravity
-    let allowsExternalPlayback: Bool
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let controller = AVPlayerViewController()
-        controller.player = player
-        controller.videoGravity = videoGravity
-        controller.showsPlaybackControls = false
-        controller.view.backgroundColor = .black
-        controller.allowsPictureInPicturePlayback = true
-        controller.canStartPictureInPictureAutomaticallyFromInline = true
-        player.allowsExternalPlayback = allowsExternalPlayback
-        return controller
-    }
-    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
-        if uiViewController.player != player { uiViewController.player = player }
-        if uiViewController.videoGravity != videoGravity { uiViewController.videoGravity = videoGravity }
-        player.allowsExternalPlayback = allowsExternalPlayback
-    }
-}
-
 struct iOSControlsOverlay: View {
     let channel: Channel
     let playerType: VideoPlayerType
@@ -216,6 +234,7 @@ struct iOSControlsOverlay: View {
     @Binding var showAspectRatioSheet: Bool
     @Binding var showDetailsPanel: Bool
     @Binding var showSupportHelp: Bool
+    let onMiniToggle: () -> Void
     let onDismiss: () -> Void
     
     private var volumeBinding: Binding<Double> {
@@ -233,21 +252,25 @@ struct iOSControlsOverlay: View {
                     // iOS'ta overlay'e tap yapınca kapanmasın, sadece auto-hide
                 }
             
-            VStack {
+            GeometryReader { geo in
+                VStack {
                 // ÜST KISIM
                 HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(channel.name).font(.headline).foregroundColor(.white)
-                        Text("Live TV").font(.caption).foregroundColor(.green)
-                        Text(playerType.rawValue)
-                            .font(.caption2.weight(.bold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.black.opacity(0.45))
-                            .cornerRadius(6)
+                    if !showChannelList { // Hide left info when channel list/search is open to avoid overlapping the search box
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(channel.name).font(.headline).foregroundColor(.white)
+                            Text("Live TV").font(.caption).foregroundColor(.green)
+                            Text(playerType.rawValue)
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.45))
+                                .cornerRadius(6)
+                        }
+                        .padding(.top, 30)
+                        .padding(.leading, 30)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.top, 30)
-                    .padding(.leading, 30)
                     
                     Spacer()
                     
@@ -329,31 +352,46 @@ struct iOSControlsOverlay: View {
                             HStack(alignment: .top, spacing: 20) {
                                 VStack(alignment: .leading) {
                                     Text("Program Info").font(.subheadline).bold()
-                                    Text("Channel Group: \(channel.group)").font(.caption)
-                                    Text("Current Program: Live Broadcast").font(.caption)
+                                    Text("Channel Group: \(channel.group)").font(.caption).lineLimit(1)
+                                    Text("Current Program: Live Broadcast").font(.caption).lineLimit(1)
                                 }
                                 .padding(12)
                                 .background(Color.black.opacity(0.85))
                                 .foregroundColor(.white)
                                 .cornerRadius(10)
+                                .frame(maxWidth: 200)
+                                .fixedSize(horizontal: false, vertical: true)
                                 
                                 VStack(alignment: .leading) {
                                     Text("Video Details").font(.subheadline).bold()
-                                    Text("Resolution: 1920x1080").font(.caption)
-                                    Text("Codec: H.264").font(.caption)
+                                    Text("Resolution: 1920x1080").font(.caption).lineLimit(1)
+                                    Text("Codec: H.264").font(.caption).lineLimit(1)
                                 }
                                 .padding(12)
                                 .background(Color.black.opacity(0.85))
                                 .foregroundColor(.white)
                                 .cornerRadius(10)
+                                .frame(maxWidth: 200)
+                                .fixedSize(horizontal: false, vertical: true)
                             }
+                            .frame(maxWidth: geo.size.width - 60)
                             .padding(.leading, 30)
                             .padding(.bottom, 20)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                         
                         Spacer()
                     
                     HStack(spacing: 16) {
+                        Button(action: { onMiniToggle() }) {
+                            Image(systemName: "pip.enter")
+                                .font(.system(size: 28))
+                                .foregroundColor(.white)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .frame(width: 60, height: 60)
+                        .background(Circle().fill(Color.black.opacity(0.5)))
+                        
                         Button(action: { withAnimation { showDetailsPanel.toggle() } }) {
                             Image(systemName: "info.circle")
                                 .font(.system(size: 28))
@@ -376,6 +414,7 @@ struct iOSControlsOverlay: View {
                     }
                     .padding(.trailing, 30)
                     .padding(.bottom, 20)
+                }
                 }
             }
             .ignoresSafeArea(.all, edges: .bottom)
@@ -557,4 +596,71 @@ struct iOSChannelListOverlay: View {
         }
     }
 }
+
+// MINI PLAYER OVERLAY
+struct iOSMiniPlayerOverlay: View {
+    let player: AVPlayer
+    let videoGravity: AVLayerVideoGravity
+    let onClose: () -> Void
+    let onExpand: () -> Void
+
+    @State private var dragOffset: CGSize = .zero
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(6)
+                        .background(Color.black.opacity(0.6))
+                        .clipShape(Circle())
+                }
+            }
+            .padding(.trailing, 6)
+
+            iOSVideoPlayerRepresentable(
+                player: player,
+                videoGravity: videoGravity,
+                allowsExternalPlayback: false,
+                pipController: .constant(nil),
+                viewModel: nil
+            )
+            .frame(width: 240, height: 140)
+            .cornerRadius(14)
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            )
+            .shadow(radius: 8)
+
+            HStack(spacing: 12) {
+                Button(action: onExpand) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .foregroundColor(.white)
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 10)
+                        .background(Color.black.opacity(0.55))
+                        .cornerRadius(10)
+                }
+                Spacer()
+            }
+            .padding(.leading, 6)
+            .padding(.bottom, 6)
+        }
+        .background(Color.black.opacity(0.35))
+        .cornerRadius(16)
+        .offset(dragOffset)
+        .gesture(
+            DragGesture()
+                .onChanged { value in dragOffset = value.translation }
+                .onEnded { _ in }
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .padding(16)
+    }
+}
+
 #endif

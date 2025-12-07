@@ -2,8 +2,12 @@ import Foundation
 import AVKit
 import Combine
 
+extension Notification.Name {
+    static let pipDidStop = Notification.Name("pipDidStop")
+}
+
 @MainActor
-class PlayerViewModel: ObservableObject {
+class PlayerViewModel: NSObject, ObservableObject, AVPictureInPictureControllerDelegate {
     
     @Published var player: AVPlayer
     @Published var isPlaying: Bool = false
@@ -58,8 +62,8 @@ class PlayerViewModel: ObservableObject {
         playerItem.externalMetadata = [titleMetadata]
         
         self.player = AVPlayer(playerItem: playerItem)
-        self.player.volume = clampedVolume
-        self.player.isMuted = isMuted
+        
+        super.init()
         
         // Load default buffer duration if not set
         if bufferDuration == 0 {
@@ -70,6 +74,10 @@ class PlayerViewModel: ObservableObject {
         if subtitlesFontSize == 0 {
             subtitlesFontSize = 22
         }
+        
+        // Set player properties after super.init
+        self.player.volume = clampedVolume
+        self.player.isMuted = isMuted
         
         // Save to recent channels
         saveToRecentChannels(channel)
@@ -83,6 +91,40 @@ class PlayerViewModel: ObservableObject {
             // Will be loaded when user opens series detail
         }
         
+        play()
+    }
+
+    /// Initialize with an existing AVPlayer instance (used when transferring playback between
+    /// mini player and fullscreen player to preserve the same playback session).
+    init(player: AVPlayer, channel: Channel, preferredPlayer: VideoPlayerType = .ksPlayer) {
+        self.primaryVideoPlayer = preferredPlayer
+        self.currentChannel = channel
+
+        let defaults = UserDefaults.standard
+        let storedVolume: Float = defaults.object(forKey: volumeDefaultsKey) != nil
+            ? defaults.float(forKey: volumeDefaultsKey)
+            : defaultVolume
+        let clampedVolume = Self.clamp(storedVolume)
+        self.volume = clampedVolume
+        self.lastNonZeroVolume = clampedVolume == 0 ? defaultVolume : clampedVolume
+        self.isMuted = clampedVolume == 0
+
+        // Reuse provided player instead of creating a new AVPlayerItem.
+        self.player = player
+
+        super.init()
+
+        // Ensure volume/ mute state is applied to the reused player
+        self.player.volume = clampedVolume
+        self.player.isMuted = isMuted
+
+        // Save to recent channels
+        saveToRecentChannels(channel)
+
+        setupAudioSession()
+        setupPlayerSettings()
+        addPlayerObservers()
+
         play()
     }
     
@@ -249,7 +291,8 @@ class PlayerViewModel: ObservableObject {
     
     private func setupAudioSession() {
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])
+            // Configure audio session for PiP support
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             // Log audio session errors (e.g., -50)
@@ -377,6 +420,53 @@ class PlayerViewModel: ObservableObject {
         playerItemStatusObserver?.invalidate()
         timeControlStatusObserver = nil
         playerItemStatusObserver = nil
+    }
+    
+    // MARK: - AVPictureInPictureControllerDelegate
+    
+    nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        print("PiP will start")
+    }
+    
+    nonisolated func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        print("✅ PiP DID START (delegate callback)")
+        Task { @MainActor in
+            // Ensure playback continues
+            if self.player.timeControlStatus != .playing {
+                print("▶️ Starting playback in PiP...")
+                self.player.play()
+            }
+        }
+    }
+    
+    nonisolated func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        print("⏹ PiP WILL STOP (delegate callback)")
+    }
+    
+    nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        print("⏹ PiP DID STOP (delegate callback)")
+        // Notify that PiP stopped - this will trigger appropriate action
+        Task { @MainActor in
+            NotificationCenter.default.post(name: .pipDidStop, object: nil)
+            print("📢 Posted pipDidStop notification")
+        }
+    }
+    
+    nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        // User tapped the right icon (restore) in native PiP
+        print("🔄 PiP restore requested (user tapped right icon)")
+        Task { @MainActor in
+            // Post notification to restore custom mini player
+            NotificationCenter.default.post(name: .init("restoreCustomMiniPlayer"), object: nil)
+            // Reject the restore to keep PiP available - we'll handle UI manually
+            // If we accept (true), the PiP controller becomes invalid and can't be reused
+            completionHandler(false)
+            print("⚠️ Restore rejected - PiP controller stays valid for reuse")
+        }
+    }
+    
+    nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+        print("❌ PiP failed to start: \(error.localizedDescription)")
     }
 }
 

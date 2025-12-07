@@ -35,11 +35,31 @@ struct TVOSPlayerView: View {
     }
     
     private var playbackChannels: [Channel] {
+        let source: [Channel]
         if let override = channelCollection?.ensuringContains(playerViewModel.currentChannel), !override.isEmpty {
-            return override
+            source = override
+        } else {
+            let base = viewModel.channels.ensuringContains(playerViewModel.currentChannel)
+            source = base.isEmpty ? [playerViewModel.currentChannel] : base
         }
-        let base = viewModel.channels.ensuringContains(playerViewModel.currentChannel)
-        return base.isEmpty ? [playerViewModel.currentChannel] : base
+        return deduplicatedChannels(source)
+    }
+
+    /// Deduplicate channels per playlist so a channel appears only once within the same playlist.
+    /// Uses tvgId when available, otherwise a normalized name.
+    private func deduplicatedChannels(_ channels: [Channel]) -> [Channel] {
+        var seen: Set<String> = []
+        var result: [Channel] = []
+        for ch in channels {
+            let playlistKey = ch.playlistID?.uuidString ?? "no-playlist"
+            let nameKey = ch.tvgId.isEmpty ? ch.name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) : ch.tvgId.lowercased()
+            let key = playlistKey + "|" + nameKey
+            if !seen.contains(key) {
+                seen.insert(key)
+                result.append(ch)
+            }
+        }
+        return result
     }
     
     private var isModalPresented: Bool { showChannelList || showCategorySelector || showAspectRatioPicker }
@@ -241,21 +261,25 @@ struct TVControlsOverlay: View {
             VStack {
                 // ÜST BAR
                 HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(playerStyle.rawValue)
-                            .font(.caption.bold())
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.white.opacity(0.2))
-                            .cornerRadius(10)
+                    if !showChannelList { // hide top-left info when channel list/search is open
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(playerStyle.rawValue)
+                                .font(.caption.bold())
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.white.opacity(0.2))
+                                .cornerRadius(10)
+                        }
+                        Spacer()
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(channel.name).font(.subheadline).foregroundColor(.white)
+                            Text("Live Broadcast").font(.caption2).foregroundColor(.green)
+                        }
+                        .padding(.trailing, 20)
+                    } else {
+                        Spacer()
                     }
-                    Spacer()
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(channel.name).font(.subheadline).foregroundColor(.white)
-                        Text("Live Broadcast").font(.caption2).foregroundColor(.green) // DİL: ENG
-                    }
-                    .padding(.trailing, 20)
                     
                     // BUTONLAR (SAĞ ÜST)
                     HStack(spacing: 12) {

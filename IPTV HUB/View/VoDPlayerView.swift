@@ -80,6 +80,7 @@ private struct iOSVoDPlayerView: View {
     @State private var selectedSubtitleID: String?
     @State private var audioGroup: AVMediaSelectionGroup?
     @State private var subtitleGroup: AVMediaSelectionGroup?
+    // PiP removed; using in-app mini player elsewhere
     
     init(initialChannel: Channel, channelCollection: [Channel]?, playerType: VideoPlayerType) {
         _playerViewModel = StateObject(wrappedValue: PlayerViewModel(channel: initialChannel, preferredPlayer: playerType))
@@ -92,7 +93,9 @@ private struct iOSVoDPlayerView: View {
             iOSVideoPlayerRepresentable(
                 player: playerViewModel.player,
                 videoGravity: .resizeAspect,
-                allowsExternalPlayback: playerType == .avKit
+                allowsExternalPlayback: playerType == .avKit,
+                pipController: .constant(nil),
+                viewModel: nil
             )
             .ignoresSafeArea()
             .onTapGesture { withAnimation { overlayVisible.toggle() } }

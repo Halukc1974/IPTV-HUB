@@ -23,6 +23,8 @@ class NetworkManager {
     static let shared = NetworkManager()
     
     private let session: URLSession
+    private let maxRetries = 2
+    private let baseRetryDelay: TimeInterval = 0.75
     
     // Initialize with a custom URLSession configuration
     private init() {
@@ -34,6 +36,11 @@ class NetworkManager {
         config.urlCache = URLCache(memoryCapacity: 50_000_000, // 50MB memory cache
                                   diskCapacity: 1_000_000_000, // 1GB disk cache
                                   diskPath: "networkCache")
+        // Keep image/icon fetches snappy and limit parallelism per host.
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 20
+        config.waitsForConnectivity = true
+        config.httpMaximumConnectionsPerHost = 4
         
         self.session = URLSession(configuration: config)
     }
@@ -43,36 +50,54 @@ class NetworkManager {
     /// Downloads raw 'Data' from a specific URL.
     /// Ideal for M3U and EPG parsers.
     @discardableResult // Caller doesn't have to use the returned value
-    func fetchData(from url: URL, cachePolicy: URLRequest.CachePolicy = .returnCacheDataElseLoad) async throws -> Data {
-        
+    func fetchData(from url: URL,
+                   cachePolicy: URLRequest.CachePolicy = .returnCacheDataElseLoad) async throws -> Data {
         print("Starting Network Request: \(url.absoluteString)")
-        
-        do {
-            var request = URLRequest(url: url)
-            request.cachePolicy = cachePolicy
-            let (data, response) = try await session.data(for: request)
-            
-            // Check HTTP response
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw NetworkError.dataNotFound // Not a valid HTTP response
+
+        var attempt = 0
+        var lastError: Error?
+
+        while attempt <= maxRetries {
+            do {
+                var request = URLRequest(url: url)
+                request.cachePolicy = cachePolicy
+                let (data, response) = try await session.data(for: request)
+
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw NetworkError.dataNotFound // Not a valid HTTP response
+                }
+
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    print("Server Error Code: \(httpResponse.statusCode)")
+                    throw NetworkError.serverError(statusCode: httpResponse.statusCode)
+                }
+
+                return data
+            } catch let error as NetworkError {
+                lastError = error
+            } catch {
+                lastError = error
             }
-            
-            // Check for success status (200-299)
-            guard (200...299).contains(httpResponse.statusCode) else {
-                print("Server Error Code: \(httpResponse.statusCode)")
-                throw NetworkError.serverError(statusCode: httpResponse.statusCode)
+
+            if attempt < maxRetries, shouldRetry(lastError) {
+                let delay = baseRetryDelay * pow(1.5, Double(attempt))
+                print("Retrying (attempt \(attempt + 1)) in \(String(format: "%.2f", delay))s for URL: \(url.absoluteString)")
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                attempt += 1
+                continue
             }
-            
-            return data
-            
-        } catch let error as NetworkError {
-            // If it's already our defined error, rethrow
-            throw error
-        } catch {
-            // Other errors (e.g., no internet connection)
-            print("Unknown Network Error: \(error.localizedDescription)")
-            throw NetworkError.unknownError(error)
+            break
         }
+
+        if let lastError {
+            if let networkError = lastError as? NetworkError {
+                throw networkError
+            }
+            print("Unknown Network Error: \(lastError.localizedDescription)")
+            throw NetworkError.unknownError(lastError)
+        }
+
+        throw NetworkError.dataNotFound
     }
     
     // MARK: - 2. Fetch Generic JSON
@@ -97,5 +122,27 @@ class NetworkManager {
             print("JSON Decoding Error: \(error.localizedDescription)")
             throw NetworkError.decodingError(error)
         }
+    }
+}
+
+private extension NetworkManager {
+    func shouldRetry(_ error: Error?) -> Bool {
+        guard let error else { return false }
+        if let networkError = error as? NetworkError {
+            switch networkError {
+            case .unknownError(let underlying):
+                return shouldRetry(underlying)
+            default:
+                return false
+            }
+        }
+        if let urlError = error as? URLError {
+            // Retry for transient connectivity issues and timeouts
+            return urlError.code == .timedOut ||
+                   urlError.code == .networkConnectionLost ||
+                   urlError.code == .cannotFindHost ||
+                   urlError.code == .cannotConnectToHost
+        }
+        return false
     }
 }

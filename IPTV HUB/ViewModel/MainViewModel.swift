@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI // Required for EnvironmentObject usage
+import AVKit
 
 @MainActor
 class MainViewModel: ObservableObject {
@@ -15,6 +16,8 @@ class MainViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var lastLoadedM3U: String?
     @Published var lastLoadedEPG: String?
+    // Optional PiP delegate reference (can be set by player owner)
+    var playerViewModelDelegate: AVPictureInPictureControllerDelegate?
 
     // MARK: - Services
     @Published var playlistManager: PlaylistManager

@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 private enum MainTab: Hashable, CaseIterable {
     case home, channels, vod, guide, categories, playlists, settings
@@ -10,10 +11,13 @@ struct MainView: View {
     @StateObject private var playlistManager = PlaylistManager()
     // ViewModel uses playlistManager from @EnvironmentObject injection
     @StateObject private var viewModel: MainViewModel
+    @StateObject private var miniPlayerManager = MiniPlayerManager()
     
     @State private var hasLoadedInitialPlaylist = false
+    @State private var showExpandedPlayer: Bool = false
     @AppStorage("themeMode") private var themeModeString: String = "System"
     @AppStorage("showTVGuide") private var showTVGuide: Bool = true
+    @AppStorage("primaryVideoPlayer") private var primaryVideoPlayerRaw: String = VideoPlayerType.ksPlayer.rawValue
 
     @State private var selectedTab: MainTab = .home
 #if os(iOS)
@@ -29,6 +33,14 @@ struct MainView: View {
         case "Dark": return .dark
         default: return nil // System
         }
+    }
+    
+    private var primaryVideoPlayer: VideoPlayerType {
+        VideoPlayerType(rawValue: primaryVideoPlayerRaw) ?? .ksPlayer
+    }
+
+    private var playerViewModelDelegate: AVPictureInPictureControllerDelegate? {
+        viewModel.playerViewModelDelegate
     }
     
     // Custom initializer for proper StateObject setup
@@ -119,8 +131,20 @@ struct MainView: View {
             }
         }
         #else
-        // iOS: Standard TabView
-        TabView(selection: $selectedTab) {
+        // iOS: Standard TabView with global mini player overlay
+        ZStack {
+            // Persistent PiP host keeps a playerLayer alive for native PiP.
+            // We always instantiate the host with either the active player or a placeholder
+            // to ensure the controller is available across the app lifecycle.
+            PiPHostView(
+                player: miniPlayerManager.currentPlayer ?? AVPlayer(),
+                videoGravity: miniPlayerManager.videoGravity,
+                pipController: $miniPlayerManager.pipController,
+                delegate: viewModel.playerViewModelDelegate
+            )
+            .frame(width: 2, height: 2)
+
+            TabView(selection: $selectedTab) {
             HomeView()
                 .id(tabResetTokens[.home]!)
                 .tabItem { Label("Home", systemImage: "house.fill") }
@@ -157,15 +181,72 @@ struct MainView: View {
                 .id(tabResetTokens[.settings]!)
                 .tabItem { Label("Settings", systemImage: "gear") }
                 .tag(MainTab.settings)
+            }
+            if miniPlayerManager.isVisible {
+                if let miniPlayer = miniPlayerManager.currentPlayer,
+                   let channel = miniPlayerManager.currentChannel {
+                    GlobalMiniPlayerOverlay(
+                        player: miniPlayer,
+                        channel: channel,
+                        videoGravity: miniPlayerManager.videoGravity,
+                        position: miniPlayerManager.position,
+                        pipController: $miniPlayerManager.pipController,
+                        onClose: { 
+                            print("❌ Close button tapped")
+                            miniPlayerManager.hide(stopPlayback: true)
+                        },
+                        onExpand: { 
+                            print("📺 Expand button tapped")
+                            // When expanding from the mini player, hide the mini (but keep playback)
+                            miniPlayerManager.hide(stopPlayback: false)
+                            // Then present the fullscreen player
+                            showExpandedPlayer = true
+                        },
+                        onBackground: {
+                            print("🌐 Background PiP button tapped")
+                            // Manuel olarak native PiP'ye geç ve uygulamayı arka plana gönder
+                            miniPlayerManager.switchToNativePiP(sendToBackground: true)
+                        }
+                    )
+                    .transition(.scale.combined(with: .opacity))
+                    .zIndex(999)
+                    .onAppear {
+                        print("🎉 GlobalMiniPlayerOverlay appeared!")
+                    }
+                } else {
+                    Color.clear
+                        .onAppear {
+                            print("⚠️ Mini player state invalid (visible with nil player/channel). Forcing hide.")
+                            miniPlayerManager.hide(stopPlayback: true)
+                        }
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showExpandedPlayer) {
+            // Fullscreen player expanded from mini player
+            if let channel = miniPlayerManager.currentChannel {
+                iOSPlayerView(
+                    initialChannel: channel,
+                    channelCollection: nil,
+                    playerType: primaryVideoPlayer,
+                    existingPlayer: miniPlayerManager.currentPlayer
+                )
+                .environmentObject(viewModel)
+                .environmentObject(playlistManager)
+                .environmentObject(miniPlayerManager)
+                // Do not auto-hide the mini on disappear — the fullscreen player can choose to show the mini itself.
+            }
         }
         .tint(Color(hex: "e94560"))
         .preferredColorScheme(colorScheme)
         .environmentObject(viewModel)
         .environmentObject(playlistManager)
+        .environmentObject(miniPlayerManager)
         .environment(\.tabSearchResetToken, searchResetToken)
         .onAppear {
             loadInitialPlaylist()
             resetTab(selectedTab)
+            miniPlayerManager.setHomeHandler { selectedTab = .home }
         }
         .onChange(of: selectedTab) { newValue in
             resetTab(newValue)
