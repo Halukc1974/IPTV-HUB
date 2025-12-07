@@ -374,6 +374,7 @@ final class MiniPlayerManager: ObservableObject {
     }
 }
 
+#if os(iOS)
 struct GlobalMiniPlayerOverlay: View {
     let player: AVPlayer
     let channel: Channel
@@ -521,3 +522,4 @@ struct GlobalMiniPlayerOverlay: View {
         }
     }
 }
+#endif

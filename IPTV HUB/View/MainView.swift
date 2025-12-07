@@ -17,6 +17,9 @@ struct MainView: View {
     @State private var showExpandedPlayer: Bool = false
     @AppStorage("themeMode") private var themeModeString: String = "System"
     @AppStorage("showTVGuide") private var showTVGuide: Bool = true
+    @AppStorage("showHomeTab") private var showHomeTab: Bool = true
+    @AppStorage("showTVTab") private var showTVTab: Bool = true
+    @AppStorage("showCategoriesTab") private var showCategoriesTab: Bool = true
     @AppStorage("primaryVideoPlayer") private var primaryVideoPlayerRaw: String = VideoPlayerType.ksPlayer.rawValue
 
     @State private var selectedTab: MainTab = .home
@@ -130,6 +133,36 @@ struct MainView: View {
                 selectedTab = .home
             }
         }
+        .onChange(of: showHomeTab) { isVisible in
+            if !isVisible && selectedTab == .home {
+                selectedTab = firstAvailableTab()
+            }
+        }
+        .onChange(of: showTVTab) { isVisible in
+            if !isVisible && selectedTab == .channels {
+                selectedTab = firstAvailableTab()
+            }
+        }
+        .onChange(of: showCategoriesTab) { isVisible in
+            if !isVisible && selectedTab == .categories {
+                selectedTab = firstAvailableTab()
+            }
+        }
+        .onChange(of: showHomeTab) { isVisible in
+            if !isVisible && selectedTab == .home {
+                selectedTab = firstAvailableTab()
+            }
+        }
+        .onChange(of: showTVTab) { isVisible in
+            if !isVisible && selectedTab == .channels {
+                selectedTab = firstAvailableTab()
+            }
+        }
+        .onChange(of: showCategoriesTab) { isVisible in
+            if !isVisible && selectedTab == .categories {
+                selectedTab = firstAvailableTab()
+            }
+        }
         #else
         // iOS: Standard TabView with global mini player overlay
         ZStack {
@@ -145,15 +178,19 @@ struct MainView: View {
             .frame(width: 2, height: 2)
 
             TabView(selection: $selectedTab) {
-            HomeView()
-                .id(tabResetTokens[.home]!)
-                .tabItem { Label("Home", systemImage: "house.fill") }
-                .tag(MainTab.home)
+                if showHomeTab {
+                    HomeView()
+                        .id(tabResetTokens[.home]!)
+                        .tabItem { Label("Home", systemImage: "house.fill") }
+                        .tag(MainTab.home)
+                }
             
-            ChannelListView()
-                .id(tabResetTokens[.channels]!)
-                .tabItem { Label("TV", systemImage: "tv.fill") }
-                .tag(MainTab.channels)
+                if showTVTab {
+                    ChannelListView()
+                        .id(tabResetTokens[.channels]!)
+                        .tabItem { Label("TV", systemImage: "tv.fill") }
+                        .tag(MainTab.channels)
+                }
             
             VoDContentView()
                 .id(tabResetTokens[.vod]!)
@@ -167,10 +204,12 @@ struct MainView: View {
                     .tag(MainTab.guide)
             }
 
-            CategoryManagerView()
-                .id(tabResetTokens[.categories]!)
-                .tabItem { Label("Categories", systemImage: "folder.fill") }
-                .tag(MainTab.categories)
+                if showCategoriesTab {
+                    CategoryManagerView()
+                        .id(tabResetTokens[.categories]!)
+                        .tabItem { Label("Categories", systemImage: "folder.fill") }
+                        .tag(MainTab.categories)
+                }
             
             SettingsView()
                 .id(tabResetTokens[.playlists]!)
@@ -294,6 +333,15 @@ private extension MainView {
 private extension MainView {
     func bumpSearchResetToken() {
         searchResetToken = UUID()
+    }
+
+    // Determine a sensible fallback tab when the current tab is hidden.
+    func firstAvailableTab() -> MainTab {
+        if showHomeTab { return .home }
+        if showTVTab { return .channels }
+        if showCategoriesTab { return .categories }
+        // VoD is usually always present
+        return .vod
     }
 }
 

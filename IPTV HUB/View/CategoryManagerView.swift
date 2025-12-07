@@ -198,5 +198,4 @@ struct CategoryRow: View {
             }
         }
     }
-}
-
+}git add .

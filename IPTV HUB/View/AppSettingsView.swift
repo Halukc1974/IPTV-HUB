@@ -138,7 +138,10 @@ struct AppSettingsView: View {
     @AppStorage("showPopularChannels") private var showPopularChannels: Bool = true
     @AppStorage("showOnlyMyCategories") private var showOnlyMyCategories: Bool = false
     @AppStorage("showTVGuide") private var showTVGuide: Bool = true
-    @AppStorage("showPlayerOverlay") private var showPlayerOverlay: Bool = true
+    // Toggle visibility of top-level tabs
+    @AppStorage("showHomeTab") private var showHomeTab: Bool = true
+    @AppStorage("showTVTab") private var showTVTab: Bool = true
+    @AppStorage("showCategoriesTab") private var showCategoriesTab: Bool = true
     @AppStorage("playlistUpdateMode") private var playlistUpdateModeString: String = PlaylistUpdateMode.manually.rawValue
     @AppStorage("channelOverlayOpacity") private var channelOverlayOpacity: Double = 0.9
     
@@ -813,20 +816,40 @@ struct AppSettingsView: View {
                                 Divider().padding(.leading, 60)
                                 
                                 ToggleRow(
+                                    title: "Home Tab",
+                                    subtitle: "Show Home tab in tab bar",
+                                    icon: "house.fill",
+                                    isOn: $showHomeTab
+                                )
+
+                                Divider().padding(.leading, 60)
+
+                                ToggleRow(
+                                    title: "TV Tab",
+                                    subtitle: "Show TV / Live channels tab in tab bar",
+                                    icon: "tv.fill",
+                                    isOn: $showTVTab
+                                )
+
+                                Divider().padding(.leading, 60)
+
+                                ToggleRow(
+                                    title: "Categories Tab",
+                                    subtitle: "Show Categories tab in tab bar",
+                                    icon: "folder.fill",
+                                    isOn: $showCategoriesTab
+                                )
+
+                                Divider().padding(.leading, 60)
+
+                                ToggleRow(
                                     title: "TV Guide Tab",
                                     subtitle: "Show TV Guide in tab bar",
                                     icon: "list.bullet.rectangle",
                                     isOn: $showTVGuide
                                 )
                                 
-                                Divider().padding(.leading, 60)
-                                
-                                ToggleRow(
-                                    title: "Player Overlay Info",
-                                    subtitle: "Show channel info, codec details and controls while playing",
-                                    icon: "info.circle",
-                                    isOn: $showPlayerOverlay
-                                )
+                                // Player Overlay Info removed per request
                             }
                             .background(Color.white)
                             .cornerRadius(12)
