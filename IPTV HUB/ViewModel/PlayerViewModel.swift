@@ -456,12 +456,15 @@ class PlayerViewModel: NSObject, ObservableObject, AVPictureInPictureControllerD
         // User tapped the right icon (restore) in native PiP
         print("🔄 PiP restore requested (user tapped right icon)")
         Task { @MainActor in
-            // Post notification to restore custom mini player
-            NotificationCenter.default.post(name: .init("restoreCustomMiniPlayer"), object: nil)
-            // Reject the restore to keep PiP available - we'll handle UI manually
-            // If we accept (true), the PiP controller becomes invalid and can't be reused
-            completionHandler(false)
-            print("⚠️ Restore rejected - PiP controller stays valid for reuse")
+                // Emit a quick 'start restore' notification so any observers can mark
+                // restore-in-flight before PiP stop events arrive (prevents races).
+                NotificationCenter.default.post(name: .init("restoreCustomMiniPlayerStart"), object: nil)
+                // Post notification to restore custom mini player
+                NotificationCenter.default.post(name: .init("restoreCustomMiniPlayer"), object: nil)
+                // Accept the restore so the system brings our app to foreground and restores UI.
+                // Accepting may invalidate the PiP controller; the host recreates it afterwards.
+                completionHandler(true)
+                print("ℹ️ Restore accepted — restore sequence started (controller may be invalidated)")
         }
     }
     

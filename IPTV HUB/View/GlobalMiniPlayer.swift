@@ -14,6 +14,8 @@ final class MiniPlayerManager: ObservableObject {
     private var backgroundObserver: NSObjectProtocol?
     private var foregroundObserver: NSObjectProtocol?
     private var restoreObserver: NSObjectProtocol?
+    private var restoreStartObserver: NSObjectProtocol?
+    private var restoreClearWorkItem: DispatchWorkItem?
     private var pipStopObserver: NSObjectProtocol?
     private var shouldRestorePlayer: Bool = false
     private var isRestoringFromPiP: Bool = false
@@ -53,6 +55,10 @@ final class MiniPlayerManager: ObservableObject {
         if let observer = pipStopObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+
+        if let observer = restoreStartObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
         
         print("🔔 Setting up PiP observers...")
         
@@ -66,7 +72,17 @@ final class MiniPlayerManager: ObservableObject {
             guard let self = self else { return }
             
             // Mark we're actively restoring so any PiP stop notifications are ignored
+            // (this handler is invoked when restore is posted)
             self.isRestoringFromPiP = true
+            // Cancel any previous clear work and schedule one as a safety fallback
+            self.restoreClearWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                print("⏳ Restore timeout expired — clearing isRestoringFromPiP")
+                self.isRestoringFromPiP = false
+            }
+            self.restoreClearWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
 
             // Manually stop PiP to restore custom player
             if let pipController = self.pipController, pipController.isPictureInPictureActive {
@@ -74,7 +90,7 @@ final class MiniPlayerManager: ObservableObject {
                 pipController.stopPictureInPicture()
                 
                 // Wait for PiP to fully stop, then show custom player
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                     self?.switchToCustomMiniPlayer()
                 }
             } else {
@@ -83,6 +99,29 @@ final class MiniPlayerManager: ObservableObject {
             }
         }
         
+        // Also listen for a fast 'restore start' notification emitted by the
+        // PiP delegate before the system stops PiP. This gives us a head-start
+        // to mark the restore-in-flight flag and avoid races with pip-stop.
+        // store observer so we can remove it later
+        restoreStartObserver = NotificationCenter.default.addObserver(
+            forName: .init("restoreCustomMiniPlayerStart"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            print("🔔 restore start received — setting isRestoringFromPiP = true")
+            self.isRestoringFromPiP = true
+            // Ensure we have a safety timeout to clear the flag if nothing else does
+            self.restoreClearWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                print("⏳ RestoreStart timeout expired — clearing isRestoringFromPiP")
+                self.isRestoringFromPiP = false
+            }
+            self.restoreClearWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        }
+
         // Listen for PiP stop (left gear icon - close PiP completely)
         pipStopObserver = NotificationCenter.default.addObserver(
             forName: .pipDidStop,
@@ -91,18 +130,43 @@ final class MiniPlayerManager: ObservableObject {
         ) { [weak self] _ in
             guard let self = self else { return }
             print("🛑 PiP stop notification received")
-            
+
             // If we're explicitly restoring custom mini player, ignore this stop event
             if self.isRestoringFromPiP {
                 print("ℹ️ PiP stopping as part of custom restore flow; skipping hide")
                 self.isNativePiPActive = false
                 self.shouldRestorePlayer = false
+                // Clear the restore-in-flight state now that PiP actually stopped
+                // and we have observed the delegate stop event.
                 self.isRestoringFromPiP = false
+                self.restoreClearWorkItem?.cancel()
+                self.restoreClearWorkItem = nil
                 return
             }
 
-            print("❌ PiP stopped outside restore flow - hiding player")
-            self.hide(stopPlayback: true)
+            // To avoid races where a restore request may still be in-flight,
+            // delay hide briefly and re-check the restore flag. If a restore
+            // started in the meantime, skip hiding. This prevents native PiP
+            // starts from wiping the mini player when the user tapped restore.
+            print("⚠️ PiP stopped — delaying hide to allow any pending restore to claim it")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self = self else { return }
+                    if self.isRestoringFromPiP {
+                    print("ℹ️ Restore flow detected after delay — skipping hide")
+                    self.isNativePiPActive = false
+                    self.shouldRestorePlayer = false
+                    // keep isRestoringFromPiP for the actual restore handler to clear
+                    // (avoid clearing early here so the restore handler can manage state)
+                        // We already scheduled a restoreClearWorkItem when the restore started —
+                        // keep it in case the delegate stop never arrives; do not cancel here.
+                        return
+                }
+
+                print("❌ PiP stopped outside restore flow after delay - hiding player (with grace)")
+                // Use grace when called from PiP stop flow so we don't drop the
+                // current player item immediately in case a late restore arrives.
+                self.hide(stopPlayback: true, allowGrace: true)
+            }
         }
         
         print("✅ PiP observers set up")
@@ -164,6 +228,16 @@ final class MiniPlayerManager: ObservableObject {
             restoreObserver = nil
             print("🗑️ Removed restore observer")
         }
+        if let work = restoreClearWorkItem {
+            work.cancel()
+            restoreClearWorkItem = nil
+            print("🗑️ Cleared restore timeout work item")
+        }
+        if let observer = restoreStartObserver {
+            NotificationCenter.default.removeObserver(observer)
+            restoreStartObserver = nil
+            print("🗑️ Removed restore-start observer")
+        }
         if let observer = pipStopObserver {
             NotificationCenter.default.removeObserver(observer)
             pipStopObserver = nil
@@ -182,7 +256,7 @@ final class MiniPlayerManager: ObservableObject {
             pipController = nil
             NotificationCenter.default.post(name: .init("PiPHostRecreateController"), object: nil)
             if attempt < 2 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                     self?.switchToNativePiP(sendToBackground: sendToBackground, attempt: attempt + 1)
                 }
             } else {
@@ -238,7 +312,7 @@ final class MiniPlayerManager: ObservableObject {
         }
         
         // Start PiP with delay — but wait/poll for isPictureInPicturePossible to become true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self = self else { return }
 
             func attemptStart(attemptsLeft: Int) {
@@ -254,8 +328,8 @@ final class MiniPlayerManager: ObservableObject {
                     return
                 }
                 // controller not yet possible — retry shortly
-                print("⚠️ startPictureInPicture: controller not yet possible, retrying in 0.25s (\(attemptsLeft) attempts left)")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                print("⚠️ startPictureInPicture: controller not yet possible, retrying in 0.15s (\(attemptsLeft) attempts left)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     attemptStart(attemptsLeft: attemptsLeft - 1)
                 }
             }
@@ -264,7 +338,7 @@ final class MiniPlayerManager: ObservableObject {
             
             // Send app to background if requested
             if sendToBackground {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     #if os(iOS)
                     UIApplication.shared.perform(#selector(NSXPCConnection.suspend))
                     print("📱 App sent to background")
@@ -303,7 +377,7 @@ final class MiniPlayerManager: ObservableObject {
             pipController.stopPictureInPicture()
             
             // Wait for PiP to stop, then show custom player
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 self?.showCustomMiniPlayer()
             }
         } else {
@@ -314,11 +388,12 @@ final class MiniPlayerManager: ObservableObject {
     }
     
     private func showCustomMiniPlayer() {
-        print("📺 showCustomMiniPlayer called")
+        print("📺 showCustomMiniPlayer called — player: \(String(describing: currentPlayer)), currentItem status: \(String(describing: currentPlayer?.currentItem?.status.rawValue))")
         // Ensure state is clean
         isNativePiPActive = false
         shouldRestorePlayer = false
-        isRestoringFromPiP = false
+        // Keep isRestoringFromPiP true until the PiP stop delegate clears it
+        // so we don't race with stop/hide flows.
         
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             isVisible = true
@@ -326,7 +401,10 @@ final class MiniPlayerManager: ObservableObject {
         print("✅ Custom mini player visible, state: isNativePiPActive=\(isNativePiPActive)")
     }
 
-    func hide(stopPlayback: Bool = true) {
+    /// Hide the mini player. When `allowGrace` is true we postpone clearing
+    /// the underlying player/channel for a short grace period so PiP stop
+    /// events that race with restore requests don't permanently drop the item.
+    func hide(stopPlayback: Bool = true, allowGrace: Bool = false) {
         print("🛑 MiniPlayerManager.hide() called (stopPlayback: \(stopPlayback))")
         
         // Only remove observers when we're stopping playback entirely.
@@ -348,10 +426,31 @@ final class MiniPlayerManager: ObservableObject {
         // Stop playback if requested
         if stopPlayback {
             currentPlayer?.pause()
-            currentPlayer?.replaceCurrentItem(with: nil)
-            print("⏸ Playback stopped")
-            currentPlayer = nil
-            currentChannel = nil
+
+            // If caller asked for a grace period (e.g. PiP stop flow), postpone
+            // clearing the player item so restore can reclaim it. Otherwise
+            // clear immediately.
+            if allowGrace {
+                print("⏸ Playback stopped (delayed removal due to grace period)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self = self else { return }
+                        // If a restore flow started in the meantime, keep the player
+                        if self.isRestoringFromPiP {
+                            print("ℹ️ Skip clearing player because a restore is in-flight (isRestoringFromPiP=true)")
+                        return
+                    }
+                    print("⚠️ Clearing player/currentChannel after grace - currentPlayer: \(String(describing: self.currentPlayer)), restoring: \(self.isRestoringFromPiP)")
+                    self.currentPlayer?.replaceCurrentItem(with: nil)
+                    self.currentPlayer = nil
+                    self.currentChannel = nil
+                    print("⏸ Playback removed after grace period")
+                }
+            } else {
+                currentPlayer?.replaceCurrentItem(with: nil)
+                print("⏸ Playback stopped")
+                currentPlayer = nil
+                currentChannel = nil
+            }
         }
         
         // Do NOT nil out pipController; keep it reusable across sessions
@@ -359,6 +458,10 @@ final class MiniPlayerManager: ObservableObject {
         isNativePiPActive = false
         shouldRestorePlayer = false
         isRestoringFromPiP = false
+        if let work = restoreClearWorkItem {
+            work.cancel()
+            restoreClearWorkItem = nil
+        }
         
         print("✅ Mini player hidden and cleaned up")
     }
