@@ -43,30 +43,42 @@ struct iOSVideoPlayerRepresentable: UIViewControllerRepresentable {
         }
     }
     
+    
     private func setupPiPController(for playerLayer: AVPlayerLayer) {
         guard AVPictureInPictureController.isPictureInPictureSupported() else {
             print("❌ PiP not supported on this device")
             return
         }
 
-        // When viewModel is nil (e.g., mini overlay), avoid creating/rebinding PiP here;
-        // the persistent host owns the controller to keep it stable across transitions.
+        // Only create if we have a viewModel (not for mini overlays)
         guard viewModel != nil else {
             return
         }
         
-        // Do not create a new PiP controller here - the `PiPHostView` owns and manages
-        // the persistent controller. If a controller exists, make sure the delegate
-        // is forwarded to the current view model so delegate callbacks reach it.
-        if let controller = pipController {
+        // Don't recreate if we already have a working controller
+        if let controller = pipController, controller.isPictureInPicturePossible {
             if controller.delegate !== viewModel {
                 controller.delegate = viewModel
-                print("🔁 Forwarded existing PiP delegate to current PlayerViewModel: \(viewModel != nil)")
+                print("🔁 Updated PiP delegate")
             }
+            return
+        }
+        
+        // Create new controller
+        let controller: AVPictureInPictureController?
+        if #available(iOS 15.0, *) {
+            let source = AVPictureInPictureController.ContentSource(playerLayer: playerLayer)
+            controller = AVPictureInPictureController(contentSource: source)
         } else {
-            // No controller yet — host should create one. We don't instantiate one here to
-            // avoid binding it to a temporary fullscreen layer that will be destroyed.
-            print("ℹ️ No shared PiP controller present in representable; relying on host")
+            controller = AVPictureInPictureController(playerLayer: playerLayer)
+        }
+        
+        if let controller = controller {
+            controller.delegate = viewModel
+            DispatchQueue.main.async {
+                self.pipController = controller
+                print("✅ PiP controller created, possible: \(controller.isPictureInPicturePossible)")
+            }
         }
     }
 }

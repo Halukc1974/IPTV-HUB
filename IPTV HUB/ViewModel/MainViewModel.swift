@@ -350,9 +350,23 @@ class MainViewModel: ObservableObject {
     }
 
     private func rebuildLiveChannelCaches() {
-        let liveChannels = channels.filter { $0.contentType == .liveTV }
-        liveTVChannelsCache = liveChannels
-        groupedLiveChannelsCache = Dictionary(grouping: liveChannels) { $0.group }
+        // Move heavy operations to background thread to prevent UI freeze
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            
+            // Capture current channels on Main Thread
+            let allChannels = await MainActor.run { self.channels }
+            
+            // Heavy filtering and grouping on background thread
+            let liveChannels = allChannels.filter { $0.contentType == .liveTV }
+            let grouped = Dictionary(grouping: liveChannels) { $0.group }
+            
+            // Update UI on Main Thread
+            await MainActor.run {
+                self.liveTVChannelsCache = liveChannels
+                self.groupedLiveChannelsCache = grouped
+            }
+        }
     }
 }
 

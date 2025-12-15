@@ -2,10 +2,6 @@ import Foundation
 import AVKit
 import Combine
 
-extension Notification.Name {
-    static let pipDidStop = Notification.Name("pipDidStop")
-}
-
 @MainActor
 class PlayerViewModel: NSObject, ObservableObject, AVPictureInPictureControllerDelegate {
     
@@ -32,6 +28,7 @@ class PlayerViewModel: NSObject, ObservableObject, AVPictureInPictureControllerD
     private var timeControlStatusObserver: NSKeyValueObservation?
     private var playerItemStatusObserver: NSKeyValueObservation?
     private var timeObserver: Any?
+    private var videoEndObserver: NSObjectProtocol?
     
     private let networkManager = NetworkManager.shared
     private let volumeDefaultsKey = "playerVolume"
@@ -339,12 +336,13 @@ class PlayerViewModel: NSObject, ObservableObject, AVPictureInPictureControllerD
         guard autoplayNextEpisode else { return }
         
         // Remove previous observer if exists
-        if let timeObserver = timeObserver {
-            player.removeTimeObserver(timeObserver)
+        if let observer = videoEndObserver {
+            NotificationCenter.default.removeObserver(observer)
+            videoEndObserver = nil
         }
         
         // Add observer for when video ends
-        NotificationCenter.default.addObserver(
+        videoEndObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: player.currentItem,
             queue: .main
@@ -420,6 +418,11 @@ class PlayerViewModel: NSObject, ObservableObject, AVPictureInPictureControllerD
         playerItemStatusObserver?.invalidate()
         timeControlStatusObserver = nil
         playerItemStatusObserver = nil
+        
+        if let observer = videoEndObserver {
+            NotificationCenter.default.removeObserver(observer)
+            videoEndObserver = nil
+        }
     }
     
     // MARK: - AVPictureInPictureControllerDelegate
@@ -444,27 +447,16 @@ class PlayerViewModel: NSObject, ObservableObject, AVPictureInPictureControllerD
     }
     
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        print("⏹ PiP DID STOP (delegate callback)")
-        // Notify that PiP stopped - this will trigger appropriate action
-        Task { @MainActor in
-            NotificationCenter.default.post(name: .pipDidStop, object: nil)
-            print("📢 Posted pipDidStop notification")
-        }
+        print("⏹ PiP stopped")
     }
     
     nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
-        // User tapped the right icon (restore) in native PiP
-        print("🔄 PiP restore requested (user tapped right icon)")
+        // User tapped restore in native PiP - accept and bring app to foreground
+        print("🔄 PiP restore requested")
         Task { @MainActor in
-                // Emit a quick 'start restore' notification so any observers can mark
-                // restore-in-flight before PiP stop events arrive (prevents races).
-                NotificationCenter.default.post(name: .init("restoreCustomMiniPlayerStart"), object: nil)
-                // Post notification to restore custom mini player
-                NotificationCenter.default.post(name: .init("restoreCustomMiniPlayer"), object: nil)
-                // Accept the restore so the system brings our app to foreground and restores UI.
-                // Accepting may invalidate the PiP controller; the host recreates it afterwards.
-                completionHandler(true)
-                print("ℹ️ Restore accepted — restore sequence started (controller may be invalidated)")
+            // Accept the restore - system will bring app to foreground and fullscreen player should appear
+            completionHandler(true)
+            print("✅ Restore accepted")
         }
     }
     

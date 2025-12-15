@@ -5,7 +5,6 @@ import AVKit
 struct iOSPlayerView: View {
     @EnvironmentObject var viewModel: MainViewModel
     @EnvironmentObject var playlistManager: PlaylistManager
-    @EnvironmentObject var miniPlayerManager: MiniPlayerManager
     @Environment(\.dismiss) var dismiss
     
     @StateObject private var playerViewModel: PlayerViewModel
@@ -21,9 +20,11 @@ struct iOSPlayerView: View {
     @State private var showAspectRatioSheet: Bool = false
     @State private var showDetailsPanel: Bool = false
     @State private var showSupportHelp: Bool = false
+    @State private var pipController: AVPictureInPictureController?
     
     // Auto-Hide Task
     @State private var hideOverlayTask: Task<Void, Never>?
+    @State private var isEditingVolume: Bool = false
     
     init(initialChannel: Channel, channelCollection: [Channel]? = nil, playerType: VideoPlayerType, existingPlayer: AVPlayer? = nil) {
         if let existing = existingPlayer {
@@ -51,7 +52,7 @@ struct iOSPlayerView: View {
                 player: playerViewModel.player,
                 videoGravity: selectedAspectRatio.videoGravity,
                 allowsExternalPlayback: playerType == .avKit,
-                pipController: $miniPlayerManager.pipController,
+                pipController: $pipController,
                 viewModel: playerViewModel
             )
             .ignoresSafeArea()
@@ -83,29 +84,36 @@ struct iOSPlayerView: View {
                     showDetailsPanel: $showDetailsPanel,
                     showSupportHelp: $showSupportHelp,
                     onMiniToggle: {
-                        print("🎬 Mini player toggle tapped!")
-                        // Use custom floating mini player with hybrid PiP support
-                        miniPlayerManager.show(
-                            player: playerViewModel.player,
-                            channel: playerViewModel.currentChannel,
-                            videoGravity: selectedAspectRatio.videoGravity,
-                            pipController: miniPlayerManager.pipController, // Shared PiP controller for background mode
-                            onExpand: {
-                                print("🔄 Expand callback registered")
-                                // Expand'e basıldığında buraya geri dönecek
-                                // Mini player otomatik hide olacak
+                        // Start native PiP and send to background
+                        guard let pipController = pipController else {
+                            print("❌ PiP controller not ready")
+                            return
+                        }
+                        
+                        if pipController.isPictureInPicturePossible {
+                            pipController.startPictureInPicture()
+                            print("✅ PiP started, sending to background...")
+                            
+                            // Send app to background after PiP starts
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                #if os(iOS)
+                                UIApplication.shared.perform(#selector(NSXPCConnection.suspend))
+                                #endif
                             }
-                        )
-                        print("✅ Mini player show called, dismissing player view...")
-                        // Player view'i dismiss et, mini player görünür olacak
-                        dismiss()
+                        } else {
+                            print("⚠️ PiP not possible right now")
+                        }
                     },
                     onDismiss: {
-                        if miniPlayerManager.isVisible {
-                            dismiss()
+                        playerViewModel.cleanup()
+                        dismiss()
+                    },
+                    onVolumeEditingChanged: { editing in
+                        isEditingVolume = editing
+                        if editing {
+                            hideOverlayTask?.cancel()
                         } else {
-                            playerViewModel.cleanup()
-                            dismiss()
+                            scheduleAutoHide()
                         }
                     }
                 )
@@ -187,17 +195,11 @@ struct iOSPlayerView: View {
                 selectedIndex = 0
             }
             toggleOverlay()
-            // Share delegate reference for persistent PiP host
+            // Share delegate reference for PiP
             viewModel.playerViewModelDelegate = playerViewModel
-            // Ensure mini player knows the current player
-            miniPlayerManager.currentPlayer = playerViewModel.player
-            miniPlayerManager.videoGravity = selectedAspectRatio.videoGravity
         }
         .onDisappear {
-            // Mini player aktifse cleanup yapma, player arka planda çalışmaya devam etsin
-            if !miniPlayerManager.isVisible {
-                playerViewModel.cleanup()
-            }
+            playerViewModel.cleanup()
         }
     }
     
@@ -236,6 +238,7 @@ struct iOSControlsOverlay: View {
     @Binding var showSupportHelp: Bool
     let onMiniToggle: () -> Void
     let onDismiss: () -> Void
+    let onVolumeEditingChanged: (Bool) -> Void  // NEW: Callback for volume interaction
     
     private var volumeBinding: Binding<Double> {
         Binding<Double>(
@@ -267,7 +270,7 @@ struct iOSControlsOverlay: View {
                                 .background(Color.black.opacity(0.45))
                                 .cornerRadius(6)
                         }
-                        .padding(.top, 30)
+                        .padding(.top, 16)
                         .padding(.leading, 30)
                         .fixedSize(horizontal: false, vertical: true)
                     }
@@ -275,7 +278,11 @@ struct iOSControlsOverlay: View {
                     Spacer()
                     
                     HStack(spacing: 16) {
-                        iOSVolumeSlider(value: volumeBinding, isMuted: playerViewModel.isMuted)
+                        iOSVolumeSlider(
+                            value: volumeBinding,
+                            isMuted: playerViewModel.isMuted,
+                            onEditingChanged: onVolumeEditingChanged
+                        )
                             .frame(width: 220)
                             .padding(.leading, 10)
                         
@@ -340,7 +347,7 @@ struct iOSControlsOverlay: View {
                         .background(Color.black.opacity(0.6))
                         .clipShape(RoundedRectangle(cornerRadius: 15))
                     }
-                    .padding(.top, 30)
+                    .padding(.top, 16)
                     .padding(.trailing, 30)
                 }
                 
@@ -447,6 +454,8 @@ struct iOSAspectRatioSheet: View {
 struct iOSVolumeSlider: View {
     @Binding var value: Double
     let isMuted: Bool
+    @State private var isEditing: Bool = false
+    var onEditingChanged: ((Bool) -> Void)? = nil
     
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -462,8 +471,47 @@ struct iOSVolumeSlider: View {
             HStack(spacing: 10) {
                 Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                     .foregroundColor(.white)
-                Slider(value: $value, in: 0...1, step: 0.01)
-                    .tint(.orange)
+                
+                // Fully Custom Slider
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        // 1. Inactive Track (Light Gray as requested)
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color(uiColor: .lightGray))
+                            .frame(height: 4)
+                        
+                        // 2. Active Track (Orange)
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.orange)
+                            .frame(width: max(0, min(geometry.size.width * CGFloat(value), geometry.size.width)), height: 4)
+                        
+                        // 3. Thumb (White Circle)
+                        Circle()
+                            .fill(Color.white)
+                            .shadow(radius: 2)
+                            .frame(width: 16, height: 16)
+                            .offset(x: max(0, min(geometry.size.width * CGFloat(value) - 8, geometry.size.width - 16)))
+                    }
+                    .frame(height: 30) // Tappable area height
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { gesture in
+                                if !isEditing {
+                                    isEditing = true
+                                    onEditingChanged?(true)
+                                }
+                                // Calculate new value based on horizontal position
+                                let newValue = Double(gesture.location.x / geometry.size.width)
+                                value = min(max(0, newValue), 1)
+                            }
+                            .onEnded { _ in
+                                isEditing = false
+                                onEditingChanged?(false)
+                            }
+                    )
+                }
+                .frame(height: 30)
             }
         }
     }

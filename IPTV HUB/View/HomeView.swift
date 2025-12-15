@@ -16,7 +16,13 @@ struct HomeView: View {
     @State private var selectedChannel: Channel?
     @State private var searchText = ""
     @State private var selectedPlaylistID: UUID? = nil // nil means "All"
+    
+    // Cached computations for performance (prevents recalculation on every render)
     @State private var cachedFilteredChannels: [Channel] = []
+    @State private var cachedRecentChannels: [Channel] = []
+    @State private var cachedChannelsByGroup: [String: [Channel]] = [:]
+    @State private var cachedFeaturedChannels: [Channel] = []
+    @State private var cachedChannelLookup: [String: Channel] = [:]
     
     @AppStorage("showRecentWatches") private var showRecentWatches: Bool = true
     @AppStorage("showPopularChannels") private var showPopularChannels: Bool = true
@@ -28,64 +34,24 @@ struct HomeView: View {
     private let horizontalCardSpacing: CGFloat = 15
 #endif
     
-    // Filtered channels based on selected playlist (memoized for performance)
+    // Use cached values instead of recomputing
     private var filteredChannelsByPlaylist: [Channel] {
-        if let playlistID = selectedPlaylistID {
-            // Filter channels by selected playlist
-            return viewModel.channels.filter { channel in
-                channel.playlistID == playlistID
-            }
-        } else {
-            // Show all channels
-            return viewModel.channels
-        }
+        cachedFilteredChannels
     }
     
-    // Recent channels (last 10 watched) - optimized
+    // Use cached value
     private var recentChannels: [Channel] {
-        let recentIDs = UserDefaults.standard.stringArray(forKey: "recentChannelIDs") ?? []
-        
-        // Create lookup dictionaries for UUIDs and stable identifiers (survive playlist reloads)
-        var channelLookup: [String: Channel] = [:]
-        filteredChannelsByPlaylist.forEach { channel in
-            channelLookup[channel.id.uuidString] = channel
-            channelLookup[channel.recentIdentifier] = channel
-        }
-        
-        let allRecent = recentIDs.compactMap { channelLookup[$0] }
-        
-        // Filter by search text
-        if searchText.isEmpty {
-            return allRecent
-        } else {
-            return allRecent.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
-        }
+        cachedRecentChannels
     }
     
-    // Grouped channels by category
+    // Use cached value
     private var channelsByGroup: [String: [Channel]] {
-        let allChannels = filteredChannelsByPlaylist
-        
-        // Filter by search text
-        let filteredChannels = searchText.isEmpty ? allChannels : allChannels.filter {
-            $0.name.localizedCaseInsensitiveContains(searchText)
-        }
-        
-        return Dictionary(grouping: filteredChannels) { $0.group }
+        cachedChannelsByGroup
     }
     
-    // Featured/Popular channels (first 10) - with action support
+    // Use cached value
     private var featuredChannels: [Channel] {
-        let allChannels = filteredChannelsByPlaylist
-        
-        // Filter by search text
-        if searchText.isEmpty {
-            return Array(allChannels.prefix(10))
-        } else {
-            // CRITICAL: Search sonuçları da tıklanabilir olmalı
-            let filtered = allChannels.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
-            return Array(filtered.prefix(20)) // Search'te daha fazla sonuç göster
-        }
+        cachedFeaturedChannels
     }
     
     // User categories
@@ -109,7 +75,7 @@ struct HomeView: View {
                 
                 // Scrollable content
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 30) {
+                    LazyVStack(alignment: .leading, spacing: 30) {
                         
                         // Recently Watched Channels (AT THE TOP - FIRST)
                         if showRecentWatches && !recentChannels.isEmpty {
@@ -179,30 +145,69 @@ struct HomeView: View {
                 .environmentObject(playlistManager)
         }
         .onChange(of: viewModel.channels) { _ in
-            // Update cached filtered channels when source changes
-            updateFilteredChannels()
+            // Update all caches when source channels change
+            updateAllCaches()
         }
         .onChange(of: selectedPlaylistID) { _ in
             // Update when playlist filter changes
-            updateFilteredChannels()
+            updateAllCaches()
+        }
+        .onChange(of: searchText) { _ in
+            // Update when search text changes
+            updateAllCaches()
         }
         .onChange(of: tabSearchResetToken) { _ in
             searchText = ""
         }
         .onAppear {
-            // Initial cache
-            updateFilteredChannels()
+            // Initial cache population
+            updateAllCaches()
         }
     }
     
     // MARK: - Helper Methods
     
-    private func updateFilteredChannels() {
+    /// Recalculates all cached data (called when channels, playlist, or search changes)
+    private func updateAllCaches() {
+        // 1. Filter by selected playlist
+        let baseChannels: [Channel]
         if let playlistID = selectedPlaylistID {
-            cachedFilteredChannels = viewModel.channels.filter { $0.playlistID == playlistID }
+            baseChannels = viewModel.channels.filter { $0.playlistID == playlistID }
         } else {
-            cachedFilteredChannels = viewModel.channels
+            baseChannels = viewModel.channels
         }
+        cachedFilteredChannels = baseChannels
+        
+        // 2. Build lookup dictionary for recent channels
+        var lookup: [String: Channel] = [:]
+        baseChannels.forEach { channel in
+            lookup[channel.id.uuidString] = channel
+            lookup[channel.recentIdentifier] = channel
+        }
+        cachedChannelLookup = lookup
+        
+        // 3. Calculate recent channels
+        let recentIDs = UserDefaults.standard.stringArray(forKey: "recentChannelIDs") ?? []
+        let allRecent = recentIDs.compactMap { lookup[$0] }
+        if searchText.isEmpty {
+            cachedRecentChannels = allRecent
+        } else {
+            cachedRecentChannels = allRecent.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        }
+        
+        // 4. Calculate featured/popular channels
+        if searchText.isEmpty {
+            cachedFeaturedChannels = Array(baseChannels.prefix(10))
+        } else {
+            let filtered = baseChannels.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+            cachedFeaturedChannels = Array(filtered.prefix(20))
+        }
+        
+        // 5. Group channels by category
+        let channelsForGrouping = searchText.isEmpty ? baseChannels : baseChannels.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+        }
+        cachedChannelsByGroup = Dictionary(grouping: channelsForGrouping) { $0.group }
     }
     
     // MARK: - Sticky Header Section (Compact Single Line with Search)
